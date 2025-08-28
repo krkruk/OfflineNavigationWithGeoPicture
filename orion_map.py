@@ -160,31 +160,95 @@ class OrionMap:
             if i % 2 == 0:
                 cv2.line(self.output_image, pts[i], pts[i+1], color, thickness)
 
-    def _draw_labeled_point(self, coords, name, color, circle_radius, font_scale, text_color):
-        # Draw filled circle
-        cv2.circle(self.output_image, coords, circle_radius, color, -1)
-
-        # Setup text
+    def _draw_labeled_box(self, coords, name, box_color, text_color, font_scale, offset):
+        """
+        Helper to draw a labeled box for any point.
+        """
         font = cv2.FONT_HERSHEY_SIMPLEX
-        # Requirement: font size 14px. This is an approximation.
-        font_scale = 0.5 
         thickness = 1
-
         text_size, _ = cv2.getTextSize(name, font, font_scale, thickness)
         
-        # Position text box above the circle
+        # Position text box above the point
         box_coords = (
-            (coords[0] - text_size[0] // 2, coords[1] - circle_radius - text_size[1] - 10),
-            (coords[0] + text_size[0] // 2, coords[1] - circle_radius)
+            (coords[0] - text_size[0] // 2, coords[1] - offset - text_size[1] - 10),
+            (coords[0] + text_size[0] // 2, coords[1] - offset)
         )
 
-        # Draw white background box and magenta border
+        # Draw white background box and colored border
         cv2.rectangle(self.output_image, box_coords[0], box_coords[1], (255, 255, 255), -1)
-        cv2.rectangle(self.output_image, box_coords[0], box_coords[1], color, 2)
+        cv2.rectangle(self.output_image, box_coords[0], box_coords[1], box_color, 2)
 
         # Draw text
         text_origin = (box_coords[0][0], box_coords[0][1] + text_size[1])
         cv2.putText(self.output_image, name, text_origin, font, font_scale, text_color, thickness)
+
+    def _draw_labeled_point(self, coords, name, color, circle_radius, font_scale, text_color):
+        # Draw filled circle
+        cv2.circle(self.output_image, coords, circle_radius, color, -1)
+
+        # Draw the label
+        self._draw_labeled_box(
+            coords=coords,
+            name=name,
+            box_color=color,
+            text_color=text_color,
+            font_scale=font_scale,
+            offset=circle_radius # Offset by the radius of the circle
+        )
+
+    def draw_navigation_points(self, nav_point_names, landmark_data):
+        """
+        Calculates the position of and draws the navigation points.
+        """
+        if self.origin_pixel is None:
+            raise ValueError("Origin pixel must be set before drawing navigation points.")
+
+        s1_name = sorted(self.ref_points_pixel_coords.keys(), key=lambda n: landmark_data.loc[n].X)[0]
+        s1_world_coords = landmark_data.loc[s1_name]
+
+        for point_name in nav_point_names:
+            point_world_coords = landmark_data.loc[point_name]
+
+            # Calculate position relative to S1 in meters
+            dx_m = point_world_coords.X - s1_world_coords.X
+            dy_m = point_world_coords.Y - s1_world_coords.Y
+
+            # Convert to pixel offset
+            dx_pixels = dx_m * self.pixels_per_meter
+            dy_pixels = dy_m * self.pixels_per_meter
+
+            # Calculate final pixel coordinates
+            # Y is added because positive Y in the CSV means below the reference line
+            point_x = self.origin_pixel[0] + int(round(dx_pixels))
+            point_y = self.origin_pixel[1] + int(round(dy_pixels))
+            
+            coords = (point_x, point_y)
+            logging.info(f"Calculated navigation point '{point_name}' at pixel coords: {coords}")
+
+            # --- Draw the point and its label ---
+            self._draw_nav_point(coords, point_name)
+
+    def _draw_nav_point(self, coords, name):
+        """
+        Draws a single navigation point marker and its label.
+        """
+        # Draw bright green square of size 6px
+        top_left = (coords[0] - 3, coords[1] - 3)
+        bottom_right = (coords[0] + 3, coords[1] + 3)
+        bright_green = (0, 255, 0)
+        cv2.rectangle(self.output_image, top_left, bottom_right, bright_green, -1) # -1 for filled
+
+        # Draw the label
+        # Requirement: font size 16px. This is an approximation.
+        font_scale = 0.6
+        self._draw_labeled_box(
+            coords=coords,
+            name=name,
+            box_color=bright_green,
+            text_color=(0,0,0), # Black
+            font_scale=font_scale,
+            offset=6 # Offset from the center of the square
+        )
 
     def get_output_path(self):
         base_name = os.path.basename(self.map_file_path)
