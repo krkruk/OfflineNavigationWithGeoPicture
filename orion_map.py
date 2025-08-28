@@ -252,22 +252,23 @@ class OrionMap:
 
     def find_and_draw_optimal_path(self, nav_point_names, landmark_data):
         """
-        Finds and draws the optimal path between navigation points using Dijkstra's algorithm.
+        Finds and draws the optimal path using a chunk-based graph.
         """
-        logging.info("Starting optimal path calculation. This may take some time...")
+        logging.info("Starting chunk-based path calculation...")
 
         # 1. Smooth the grayscale image with Median Filter
-        logging.info("Applying 7x7 Median filter to grayscale image to smooth path...")
-        smoothed_grayscale = cv2.medianBlur(self.grayscale_image, 7)
+        logging.info("Applying 5x5 Median filter to grayscale image...")
+        smoothed_grayscale = cv2.medianBlur(self.grayscale_image, 5)
 
-        # 2. Create the pixel graph from the smoothed image
-        logging.info("Creating pixel graph from smoothed grayscale image...")
-        graph = self._create_pixel_graph(smoothed_grayscale)
-        logging.info("Pixel graph created successfully.")
+        # 2. Create the chunk-based graph
+        chunk_size = 20
+        logging.info(f"Creating {chunk_size}x{chunk_size} chunk-based graph...")
+        graph, grid_w, grid_h = self._create_chunk_graph(smoothed_grayscale, chunk_size)
+        logging.info("Chunk-based graph created successfully.")
 
-        # 3. Find path between consecutive points and prepare legend data
+        # 3. Find path between consecutive points
         legend_lines = []
-        full_path = []
+        full_path_pixels = []
         s1_name = sorted(self.ref_points_pixel_coords.keys(), key=lambda n: landmark_data.loc[n].X)[0]
         s1_world_coords = landmark_data.loc[s1_name]
 
@@ -275,13 +276,13 @@ class OrionMap:
             start_node_name = nav_point_names[i]
             end_node_name = nav_point_names[i+1]
 
-            # Calculate straight-line distance in meters for the legend
+            # Calculate straight-line distance for the legend
             p1_lm = landmark_data.loc[start_node_name]
             p2_lm = landmark_data.loc[end_node_name]
             dist_m = np.sqrt((p1_lm.X - p2_lm.X)**2 + (p1_lm.Y - p2_lm.Y)**2)
             legend_lines.append(f"{start_node_name} -> {end_node_name}: {dist_m:.1f}m")
 
-            # Get pixel coordinates for Dijkstra
+            # Get pixel coordinates for path start/end
             start_coords = landmark_data.loc[start_node_name]
             end_coords = landmark_data.loc[end_node_name]
             start_node_px = (
@@ -293,34 +294,36 @@ class OrionMap:
                 self.origin_pixel[1] + int(round((end_coords.Y - s1_world_coords.Y) * self.pixels_per_meter))
             )
 
-            logging.info(f"Calculating path from {start_node_name} {start_node_px} to {end_node_name} {end_node_px}...")
+            # Convert pixel coords to chunk indices
+            start_chunk_x, start_chunk_y = start_node_px[0] // chunk_size, start_node_px[1] // chunk_size
+            end_chunk_x, end_chunk_y = end_node_px[0] // chunk_size, end_node_px[1] // chunk_size
+            start_index = start_chunk_y * grid_w + start_chunk_x
+            end_index = end_chunk_y * grid_w + end_chunk_x
 
-            h, w = self.grayscale_image.shape
-            start_index = start_node_px[1] * w + start_node_px[0]
-            end_index = end_node_px[1] * w + end_node_px[0]
+            logging.info(f"Calculating path from {start_node_name} (chunk {start_chunk_x},{start_chunk_y}) to {end_node_name} (chunk {end_chunk_x},{end_chunk_y})...")
 
             from scipy.sparse.csgraph import dijkstra
-            distances, predecessors = dijkstra(csgraph=graph, directed=False, indices=start_index, return_predecessors=True)
+            _, predecessors = dijkstra(csgraph=graph, directed=False, indices=start_index, return_predecessors=True)
 
-            path = []
+            path_indices = []
             curr = end_index
-            while curr != -9999 and curr != start_index:
-                path.append(curr)
-                curr = predecessors[curr]
-            path.append(start_index)
-            path.reverse()
-
-            if predecessors[end_index] == -9999:
+            if predecessors[curr] == -9999:
                 logging.warning(f"No path found from {start_node_name} to {end_node_name}.")
                 continue
+            while curr != -9999 and curr != start_index:
+                path_indices.append(curr)
+                curr = predecessors[curr]
+            path_indices.append(start_index)
+            path_indices.reverse()
 
-            path_pixels = [(p % w, p // w) for p in path]
-            full_path.extend(path_pixels)
+            # Convert chunk path to pixel path (center of chunks)
+            path_pixels = [((idx % grid_w) * chunk_size + chunk_size // 2, (idx // grid_w) * chunk_size + chunk_size // 2) for idx in path_indices]
+            full_path_pixels.extend(path_pixels)
 
         # 4. Draw the path
         logging.info("Drawing optimal path...")
-        for i in range(len(full_path) - 1):
-            cv2.line(self.output_image, full_path[i], full_path[i+1], (0, 255, 0), 2)
+        for i in range(len(full_path_pixels) - 1):
+            cv2.line(self.output_image, full_path_pixels[i], full_path_pixels[i+1], (0, 255, 0), 2)
 
         # 5. Draw the legend
         logging.info("Drawing legend...")
@@ -352,37 +355,47 @@ class OrionMap:
 
         self.output_image = canvas
 
-    def _create_pixel_graph(self, image_data):
+    def _create_chunk_graph(self, image_data, chunk_size):
         """
-        Creates a sparse graph representation of the provided image data.
+        Creates a sparse graph from image chunks.
+        Node cost is standard deviation of pixels in the chunk.
+        Edge weight is the average cost of the two nodes.
         """
         from scipy.sparse import lil_matrix
         h, w = image_data.shape
-        n_nodes = h * w
+        grid_h = int(np.ceil(h / chunk_size))
+        grid_w = int(np.ceil(w / chunk_size))
+        n_nodes = grid_h * grid_w
+
+        # Calculate cost for each node (chunk)
+        node_costs = np.zeros(n_nodes)
+        for r in range(grid_h):
+            for c in range(grid_w):
+                node_idx = r * grid_w + c
+                chunk = image_data[r*chunk_size:(r+1)*chunk_size, c*chunk_size:(c+1)*chunk_size]
+                if chunk.size == 0:
+                    node_costs[node_idx] = float('inf') # Impassable
+                    continue
+                # Cost is standard deviation. Add 1 to avoid zero-cost flat areas.
+                cost = np.std(chunk) + 1
+                node_costs[node_idx] = cost
+
+        # Create graph and add edges
         graph = lil_matrix((n_nodes, n_nodes))
-
-        for r in range(h):
-            for c in range(w):
-                node_idx = r * w + c
-                node_intensity = image_data[r, c]
-
-                # Connect to 8 neighbors
+        for r in range(grid_h):
+            for c in range(grid_w):
+                node_idx = r * grid_w + c
                 for dr in [-1, 0, 1]:
                     for dc in [-1, 0, 1]:
-                        if dr == 0 and dc == 0:
-                            continue
-                        
+                        if dr == 0 and dc == 0: continue
                         nr, nc = r + dr, c + dc
-
-                        if 0 <= nr < h and 0 <= nc < w:
-                            neighbor_idx = nr * w + nc
-                            neighbor_intensity = image_data[nr, nc]
-
-                            # Edge weight is the absolute difference in intensity
-                            weight = float(abs(int(node_intensity) - int(neighbor_intensity)))
+                        if 0 <= nr < grid_h and 0 <= nc < grid_w:
+                            neighbor_idx = nr * grid_w + nc
+                            # Edge weight is average of the two node costs
+                            weight = (node_costs[node_idx] + node_costs[neighbor_idx]) / 2.0
                             graph[node_idx, neighbor_idx] = weight
         
-        return graph.tocsr()
+        return graph.tocsr(), grid_w, grid_h
 
     def get_output_path(self):
         base_name = os.path.basename(self.map_file_path)
