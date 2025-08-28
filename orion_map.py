@@ -250,6 +250,110 @@ class OrionMap:
             offset=6 # Offset from the center of the square
         )
 
+    def find_and_draw_optimal_path(self, nav_point_names, landmark_data):
+        """
+        Finds and draws the optimal path between navigation points using Dijkstra's algorithm.
+        """
+        logging.info("Starting optimal path calculation. This may take some time...")
+
+        # 1. Get pixel coordinates for all navigation points
+        nav_points_coords = []
+        s1_name = sorted(self.ref_points_pixel_coords.keys(), key=lambda n: landmark_data.loc[n].X)[0]
+        s1_world_coords = landmark_data.loc[s1_name]
+
+        for point_name in nav_point_names:
+            point_world_coords = landmark_data.loc[point_name]
+            dx_m = point_world_coords.X - s1_world_coords.X
+            dy_m = point_world_coords.Y - s1_world_coords.Y
+            dx_pixels = dx_m * self.pixels_per_meter
+            dy_pixels = dy_m * self.pixels_per_meter
+            point_x = self.origin_pixel[0] + int(round(dx_pixels))
+            point_y = self.origin_pixel[1] + int(round(dy_pixels))
+            nav_points_coords.append((point_x, point_y))
+
+        # 2. Smooth the grayscale image
+        logging.info("Applying 7x7 Gaussian blur to grayscale image to smooth path...")
+        smoothed_grayscale = cv2.GaussianBlur(self.grayscale_image, (7, 7), 0)
+
+        # 3. Create the pixel graph from the smoothed image
+        logging.info("Creating pixel graph from smoothed grayscale image...")
+        graph = self._create_pixel_graph(smoothed_grayscale)
+        logging.info("Pixel graph created successfully.")
+
+        # 4. Find path between consecutive points
+        full_path = []
+        for i in range(len(nav_points_coords) - 1):
+            start_node_px = nav_points_coords[i]
+            end_node_px = nav_points_coords[i+1]
+            start_node_name = nav_point_names[i]
+            end_node_name = nav_point_names[i+1]
+
+            logging.info(f"Calculating path from {start_node_name} {start_node_px} to {end_node_name} {end_node_px}...")
+
+            # Convert pixel coords to graph indices
+            h, w = self.grayscale_image.shape
+            start_index = start_node_px[1] * w + start_node_px[0]
+            end_index = end_node_px[1] * w + end_node_px[0]
+
+            # Run Dijkstra
+            from scipy.sparse.csgraph import dijkstra
+            distances, predecessors = dijkstra(csgraph=graph, directed=False, indices=start_index, return_predecessors=True)
+
+            # Reconstruct path
+            path = []
+            curr = end_index
+            while curr != -9999 and curr != start_index:
+                path.append(curr)
+                curr = predecessors[curr]
+            path.append(start_index)
+            path.reverse()
+
+            if predecessors[end_index] == -9999:
+                logging.warning(f"No path found from {start_node_name} to {end_node_name}.")
+                continue
+
+            # Convert path indices back to pixel coordinates
+            path_pixels = [(p % w, p // w) for p in path]
+            full_path.extend(path_pixels)
+
+        # 5. Draw the path
+        logging.info("Drawing optimal path...")
+        for i in range(len(full_path) - 1):
+            # Draw a line between each pixel in the path to form a continuous line
+            cv2.line(self.output_image, full_path[i], full_path[i+1], (0, 255, 0), 2)
+
+    def _create_pixel_graph(self, image_data):
+        """
+        Creates a sparse graph representation of the provided image data.
+        """
+        from scipy.sparse import lil_matrix
+        h, w = image_data.shape
+        n_nodes = h * w
+        graph = lil_matrix((n_nodes, n_nodes))
+
+        for r in range(h):
+            for c in range(w):
+                node_idx = r * w + c
+                node_intensity = image_data[r, c]
+
+                # Connect to 8 neighbors
+                for dr in [-1, 0, 1]:
+                    for dc in [-1, 0, 1]:
+                        if dr == 0 and dc == 0:
+                            continue
+                        
+                        nr, nc = r + dr, c + dc
+
+                        if 0 <= nr < h and 0 <= nc < w:
+                            neighbor_idx = nr * w + nc
+                            neighbor_intensity = image_data[nr, nc]
+
+                            # Edge weight is the absolute difference in intensity
+                            weight = float(abs(int(node_intensity) - int(neighbor_intensity)))
+                            graph[node_idx, neighbor_idx] = weight
+        
+        return graph.tocsr()
+
     def get_output_path(self):
         base_name = os.path.basename(self.map_file_path)
         name, ext = os.path.splitext(base_name)

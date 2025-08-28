@@ -49,7 +49,10 @@ def main():
         nav_point_names = [name.strip().upper() for name in args.nav_points.split(',')]
         orion_map.draw_navigation_points(nav_point_names, landmark_manager.landmarks)
 
-        # 5. Save final output
+        # 5. Find and Draw Optimal Path
+        orion_map.find_and_draw_optimal_path(nav_point_names, landmark_manager.landmarks)
+
+        # 6. Save final output
         orion_map.save_output_image()
 
         logging.info("Processing complete. Output image generated.")
