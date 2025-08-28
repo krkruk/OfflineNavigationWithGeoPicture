@@ -45,3 +45,5 @@ uv run main.py --ref-points=S1,W6,W7 --nav-points=S4,W2,W5,W6,W8 --landmarks-fil
 
 -   `output_<original_name>.png`: The original map image with the reference line, reference points, and navigation points drawn and labeled.
 -   `grayscale_<original_name>.png`: A grayscale version of the original map.
+
+![Output Image](output_MarsYard_CoordSys.png)

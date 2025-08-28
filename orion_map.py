@@ -261,7 +261,7 @@ class OrionMap:
         smoothed_grayscale = cv2.medianBlur(self.grayscale_image, 5)
 
         # 2. Create the chunk-based graph
-        chunk_size = 20
+        chunk_size = 30
         logging.info(f"Creating {chunk_size}x{chunk_size} chunk-based graph...")
         graph, grid_w, grid_h = self._create_chunk_graph(smoothed_grayscale, chunk_size)
         logging.info("Chunk-based graph created successfully.")
