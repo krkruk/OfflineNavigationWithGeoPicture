@@ -256,50 +256,52 @@ class OrionMap:
         """
         logging.info("Starting optimal path calculation. This may take some time...")
 
-        # 1. Get pixel coordinates for all navigation points
-        nav_points_coords = []
-        s1_name = sorted(self.ref_points_pixel_coords.keys(), key=lambda n: landmark_data.loc[n].X)[0]
-        s1_world_coords = landmark_data.loc[s1_name]
+        # 1. Smooth the grayscale image with Median Filter
+        logging.info("Applying 7x7 Median filter to grayscale image to smooth path...")
+        smoothed_grayscale = cv2.medianBlur(self.grayscale_image, 7)
 
-        for point_name in nav_point_names:
-            point_world_coords = landmark_data.loc[point_name]
-            dx_m = point_world_coords.X - s1_world_coords.X
-            dy_m = point_world_coords.Y - s1_world_coords.Y
-            dx_pixels = dx_m * self.pixels_per_meter
-            dy_pixels = dy_m * self.pixels_per_meter
-            point_x = self.origin_pixel[0] + int(round(dx_pixels))
-            point_y = self.origin_pixel[1] + int(round(dy_pixels))
-            nav_points_coords.append((point_x, point_y))
-
-        # 2. Smooth the grayscale image
-        logging.info("Applying 7x7 Gaussian blur to grayscale image to smooth path...")
-        smoothed_grayscale = cv2.GaussianBlur(self.grayscale_image, (7, 7), 0)
-
-        # 3. Create the pixel graph from the smoothed image
+        # 2. Create the pixel graph from the smoothed image
         logging.info("Creating pixel graph from smoothed grayscale image...")
         graph = self._create_pixel_graph(smoothed_grayscale)
         logging.info("Pixel graph created successfully.")
 
-        # 4. Find path between consecutive points
+        # 3. Find path between consecutive points and prepare legend data
+        legend_lines = []
         full_path = []
-        for i in range(len(nav_points_coords) - 1):
-            start_node_px = nav_points_coords[i]
-            end_node_px = nav_points_coords[i+1]
+        s1_name = sorted(self.ref_points_pixel_coords.keys(), key=lambda n: landmark_data.loc[n].X)[0]
+        s1_world_coords = landmark_data.loc[s1_name]
+
+        for i in range(len(nav_point_names) - 1):
             start_node_name = nav_point_names[i]
             end_node_name = nav_point_names[i+1]
 
+            # Calculate straight-line distance in meters for the legend
+            p1_lm = landmark_data.loc[start_node_name]
+            p2_lm = landmark_data.loc[end_node_name]
+            dist_m = np.sqrt((p1_lm.X - p2_lm.X)**2 + (p1_lm.Y - p2_lm.Y)**2)
+            legend_lines.append(f"{start_node_name} -> {end_node_name}: {dist_m:.1f}m")
+
+            # Get pixel coordinates for Dijkstra
+            start_coords = landmark_data.loc[start_node_name]
+            end_coords = landmark_data.loc[end_node_name]
+            start_node_px = (
+                self.origin_pixel[0] + int(round((start_coords.X - s1_world_coords.X) * self.pixels_per_meter)),
+                self.origin_pixel[1] + int(round((start_coords.Y - s1_world_coords.Y) * self.pixels_per_meter))
+            )
+            end_node_px = (
+                self.origin_pixel[0] + int(round((end_coords.X - s1_world_coords.X) * self.pixels_per_meter)),
+                self.origin_pixel[1] + int(round((end_coords.Y - s1_world_coords.Y) * self.pixels_per_meter))
+            )
+
             logging.info(f"Calculating path from {start_node_name} {start_node_px} to {end_node_name} {end_node_px}...")
 
-            # Convert pixel coords to graph indices
             h, w = self.grayscale_image.shape
             start_index = start_node_px[1] * w + start_node_px[0]
             end_index = end_node_px[1] * w + end_node_px[0]
 
-            # Run Dijkstra
             from scipy.sparse.csgraph import dijkstra
             distances, predecessors = dijkstra(csgraph=graph, directed=False, indices=start_index, return_predecessors=True)
 
-            # Reconstruct path
             path = []
             curr = end_index
             while curr != -9999 and curr != start_index:
@@ -312,15 +314,43 @@ class OrionMap:
                 logging.warning(f"No path found from {start_node_name} to {end_node_name}.")
                 continue
 
-            # Convert path indices back to pixel coordinates
             path_pixels = [(p % w, p // w) for p in path]
             full_path.extend(path_pixels)
 
-        # 5. Draw the path
+        # 4. Draw the path
         logging.info("Drawing optimal path...")
         for i in range(len(full_path) - 1):
-            # Draw a line between each pixel in the path to form a continuous line
             cv2.line(self.output_image, full_path[i], full_path[i+1], (0, 255, 0), 2)
+
+        # 5. Draw the legend
+        logging.info("Drawing legend...")
+        self._draw_legend("Navigation steps", legend_lines)
+
+    def _draw_legend(self, title, legend_lines):
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.7
+        font_thickness = 1
+        line_height = 25
+        margin = 20
+
+        title_size, _ = cv2.getTextSize(title, font, font_scale, font_thickness)
+        legend_height = title_size[1] + len(legend_lines) * line_height + 2 * margin
+        
+        h, w, _ = self.output_image.shape
+        new_h = h + legend_height
+        canvas = np.full((new_h, w, 3), 255, dtype=np.uint8)
+        canvas[0:h, 0:w] = self.output_image
+
+        title_x = margin
+        title_y = h + margin + title_size[1]
+        cv2.putText(canvas, title, (title_x, title_y), font, font_scale, (0,0,0), font_thickness)
+
+        current_y = title_y + line_height
+        for line in legend_lines:
+            cv2.putText(canvas, line, (margin, current_y), font, font_scale, (0,0,0), font_thickness)
+            current_y += line_height
+
+        self.output_image = canvas
 
     def _create_pixel_graph(self, image_data):
         """
